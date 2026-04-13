@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: observability-demo-loadgen
+  namespace: observability-demo
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: curl
+          image: curlimages/curl:8.12.1
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              requestCount=1
+              while [ "$requestCount" -le 120 ]; do
+                curl -sS -o /dev/null http://observability-demo:8080/ || true
+                sleep 2
+                requestCount=$((requestCount + 1))
+              done

@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observability-demo-app
+  namespace: observability-demo
+data:
+  server.js: |
+    const express = require("express");
+    const client = require("prom-client");
+    const { trace, SpanStatusCode } = require("@opentelemetry/api");
+    const { useAzureMonitor } = require("@azure/monitor-opentelemetry");
+
+    if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
+      useAzureMonitor();
+    }
+
+    const app = express();
+    const tracer = trace.getTracer("observability-demo");
+    const register = new client.Registry();
+
+    client.collectDefaultMetrics({ register });
+
+    const requestCounter = new client.Counter({
+      name: "demo_http_requests_total",
+      help: "Total HTTP requests handled by the demo app.",
+      labelNames: ["route", "method", "status_code"],
+      registers: [register]
+    });
+
+    const requestDuration = new client.Histogram({
+      name: "demo_http_request_duration_seconds",
+      help: "HTTP request duration in seconds.",
+      labelNames: ["route", "method", "status_code"],
+      buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+      registers: [register]
+    });
+
+    const appPort = Number(process.env.PORT || 8080);
+
+    app.get("/healthz", (_request, response) => {
+      response.status(200).send("ok");
+    });
+
+    app.get("/metrics", async (_request, response) => {
+      response.set("Content-Type", register.contentType);
+      response.end(await register.metrics());
+    });
+
+    app.get("/", async (_request, response) => {
+      tracer.startActiveSpan("demoRequest", async (span) => {
+        const timer = requestDuration.startTimer({ route: "/", method: "GET" });
+
+        try {
+          const delayMs = Math.floor(Math.random() * 400);
+
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+          if (Math.random() < 0.15) {
+            throw new Error("Synthetic failure to demonstrate observability.");
+          }
+
+          requestCounter.inc({ route: "/", method: "GET", status_code: "200" });
+          timer({ status_code: "200" });
+
+          console.log(JSON.stringify({
+            level: "info",
+            message: "Handled demo request.",
+            delayMs,
+            result: "success"
+          }));
+
+          response.status(200).json({
+            message: "hello from observability-demo",
+            delayMs,
+            success: true
+          });
+        }
+        catch (error) {
+          span.recordException(error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+
+          requestCounter.inc({ route: "/", method: "GET", status_code: "500" });
+          timer({ status_code: "500" });
+
+          console.error(JSON.stringify({
+            level: "error",
+            message: "Handled demo request.",
+            error: error.message,
+            result: "failure"
+          }));
+
+          response.status(500).json({
+            message: error.message,
+            success: false
+          });
+        }
+        finally {
+          span.end();
+        }
+      });
+    });
+
+    app.listen(appPort, () => {
+      console.log(JSON.stringify({
+        level: "info",
+        message: "Demo app started.",
+        port: appPort
+      }));
+    });

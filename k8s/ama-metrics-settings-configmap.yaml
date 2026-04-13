@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ama-metrics-settings-configmap
+  namespace: kube-system
+data:
+  pod-annotation-based-scraping: |-
+    podannotationnamespaceregex = "observability-demo"

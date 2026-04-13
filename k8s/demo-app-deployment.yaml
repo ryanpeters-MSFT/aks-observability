@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observability-demo
+  namespace: observability-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: observability-demo
+  template:
+    metadata:
+      labels:
+        app: observability-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      initContainers:
+        - name: prepare-app
+          image: node:20-alpine
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              cp /config/server.js /app/server.js
+              cd /app
+              npm init -y >/dev/null 2>&1
+              npm install express prom-client @azure/monitor-opentelemetry @opentelemetry/api --omit=dev
+          volumeMounts:
+            - name: app-config
+              mountPath: /config
+            - name: app-data
+              mountPath: /app
+      containers:
+        - name: web
+          image: node:20-alpine
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              cd /app
+              node server.js
+          env:
+            - name: PORT
+              value: "8080"
+            - name: OTEL_SERVICE_NAME
+              value: "observability-demo"
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: app-insights-connection-string
+                  key: APPLICATIONINSIGHTS_CONNECTION_STRING
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - name: app-data
+              mountPath: /app
+      volumes:
+        - name: app-config
+          configMap:
+            name: observability-demo-app
+        - name: app-data
+          emptyDir: {}
