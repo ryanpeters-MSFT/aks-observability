@@ -18,7 +18,7 @@ spec:
             - |
               requestCount=1
               while [ "$requestCount" -le 120 ]; do
-                curl -sS -o /dev/null http://observability-demo:8080/ || true
+                curl -sS -o /dev/null http://observability-demo/ || true
                 sleep 2
                 requestCount=$((requestCount + 1))
               done

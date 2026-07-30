@@ -1,0 +1,10 @@
+apiVersion: monitor.azure.com/v1
+kind: Instrumentation
+metadata:
+  name: demo-instrumentation
+  namespace: observability-demo
+spec:
+  settings:
+    autoInstrumentationPlatforms: []
+  destination:
+    applicationInsightsConnectionString: "__APPLICATION_INSIGHTS_CONNECTION_STRING__"

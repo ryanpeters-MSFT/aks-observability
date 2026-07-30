@@ -16,6 +16,8 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: "8080"
+        instrumentation.opentelemetry.io/inject-nodejs: "demo-instrumentation"
+        monitor.azure.com/enable-application-logs: "true"
     spec:
       initContainers:
         - name: prepare-app
@@ -28,7 +30,7 @@ spec:
               cp /config/server.js /app/server.js
               cd /app
               npm init -y >/dev/null 2>&1
-              npm install express prom-client @azure/monitor-opentelemetry @opentelemetry/api --omit=dev
+              npm install express prom-client --omit=dev
           volumeMounts:
             - name: app-config
               mountPath: /config
@@ -49,11 +51,6 @@ spec:
               value: "8080"
             - name: OTEL_SERVICE_NAME
               value: "observability-demo"
-            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
-              valueFrom:
-                secretKeyRef:
-                  name: app-insights-connection-string
-                  key: APPLICATIONINSIGHTS_CONNECTION_STRING
           ports:
             - name: http
               containerPort: 8080

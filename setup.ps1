@@ -1,8 +1,6 @@
-param(
-    [string]$location = "centralus",
-    [string]$nodeVmSize = "Standard_DS2_v2",
-    [int]$nodeCount = 2
-)
+$location = "centralus"
+$nodeVmSize = "Standard_DS2_v2"
+$nodeCount = 2
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -11,15 +9,16 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
     $PSNativeCommandUseErrorActionPreference = $true
 }
 
-$resourceGroupName = "rg-aks-observability"
+$resourceGroupName = "rg-aks-observability-appmon"
 $clusterName = "aksobservability"
 $virtualNetworkName = "vnet-aks-observability"
 $aksSubnetName = "snet-aks"
 $logAnalyticsWorkspaceName = "law-aks-observability"
 $azureMonitorWorkspaceName = "amw-aks-observability"
-$applicationInsightsName = "appi-aks-observability"
+$applicationInsightsName = "appi-aks-observability-appmon"
 $diagnosticSettingName = "aks-control-plane-logs"
 $demoNamespace = "observability-demo"
+$featureName = "AzureMonitorAppMonitoringPreview"
 
 $virtualNetworkAddressPrefix = "10.10.0.0/16"
 $aksSubnetAddressPrefix = "10.10.0.0/24"
@@ -29,15 +28,38 @@ $dnsServiceIp = "10.20.0.10"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $namespaceFilePath = Join-Path $scriptRoot "k8s\namespace.yaml"
 $metricsConfigFilePath = Join-Path $scriptRoot "k8s\ama-metrics-settings-configmap.yaml"
+$instrumentationTemplateFilePath = Join-Path $scriptRoot "k8s\app-monitoring-instrumentation.yaml"
 
 Write-Host "Checking Azure CLI login..."
 $subscriptionId = az account show --query id --output tsv --only-show-errors
 
-Write-Host "Removing aks-preview extension if it is installed..."
-$aksPreviewInstalled = az extension list --query "[?name=='aks-preview'] | length(@)" --output tsv --only-show-errors
+Write-Host "Ensuring aks-preview extension is installed..."
 
-if ($aksPreviewInstalled -eq "1") {
-    az extension remove --name aks-preview --output none --only-show-errors
+try {
+    az extension show --name aks-preview --output none --only-show-errors 2>$null | Out-Null
+}
+catch {
+    az extension add --name aks-preview --allow-preview true --output none --only-show-errors
+}
+
+az extension update --name aks-preview --output none --only-show-errors
+
+Write-Host "Checking AKS app monitoring preview registration..."
+$featureState = az feature show `
+    --namespace Microsoft.ContainerService `
+    --name $featureName `
+    --query properties.state `
+    --output tsv `
+    --only-show-errors
+
+if ($featureState -eq "NotRegistered") {
+    Write-Host "Registering AKS app monitoring preview feature..."
+    az feature register --namespace Microsoft.ContainerService --name $featureName --output none --only-show-errors
+    $featureState = "Registering"
+}
+
+if ($featureState -ne "Registered") {
+    throw "AKS app monitoring preview feature state is '$featureState'. Wait until it becomes 'Registered', then rerun .\setup.ps1."
 }
 
 Write-Host "Registering required resource providers..."
@@ -161,7 +183,7 @@ catch {
 }
 
 if (-not $clusterExists) {
-    Write-Host "Creating AKS cluster with Azure Monitor logs and managed Prometheus enabled..."
+    Write-Host "Creating AKS cluster with Azure Monitor logs, managed Prometheus, and app monitoring enabled..."
     az aks create `
         --resource-group $resourceGroupName `
         --name $clusterName `
@@ -179,6 +201,7 @@ if (-not $clusterExists) {
         --workspace-resource-id $logAnalyticsWorkspaceId `
         --enable-azure-monitor-metrics `
         --azure-monitor-workspace-resource-id $azureMonitorWorkspaceId `
+        --enable-azure-monitor-app-monitoring `
         --no-wait `
         --output none `
         --only-show-errors
@@ -234,6 +257,7 @@ else {
         --name $clusterName `
         --enable-azure-monitor-metrics `
         --azure-monitor-workspace-resource-id $azureMonitorWorkspaceId `
+        --enable-azure-monitor-app-monitoring `
         --no-wait `
         --output none `
         --only-show-errors
@@ -331,22 +355,15 @@ if (Test-Path $namespaceFilePath) {
     kubectl apply -f $namespaceFilePath | Out-Null
 }
 
-Write-Host "Creating Application Insights connection string secret for the demo app..."
-$secretFilePath = Join-Path $env:TEMP "app-insights-connection-string.yaml"
-
-@"
-apiVersion: v1
-kind: Secret
-metadata:
-  name: app-insights-connection-string
-  namespace: $demoNamespace
-type: Opaque
-stringData:
-  APPLICATIONINSIGHTS_CONNECTION_STRING: "$applicationInsightsConnectionString"
-"@ | Set-Content -Path $secretFilePath -Encoding utf8
-
-kubectl apply -f $secretFilePath | Out-Null
-Remove-Item $secretFilePath -Force
+if (Test-Path $instrumentationTemplateFilePath) {
+        Write-Host "Applying app monitoring onboarding manifest..."
+        $instrumentationFilePath = Join-Path $env:TEMP "app-monitoring-instrumentation.yaml"
+        $instrumentationManifest = Get-Content -Path $instrumentationTemplateFilePath -Raw
+        $instrumentationManifest = $instrumentationManifest.Replace("__APPLICATION_INSIGHTS_CONNECTION_STRING__", $applicationInsightsConnectionString)
+        $instrumentationManifest | Set-Content -Path $instrumentationFilePath -Encoding utf8
+        kubectl apply -f $instrumentationFilePath | Out-Null
+        Remove-Item $instrumentationFilePath -Force
+}
 
 Write-Host "Collecting a quick status summary..."
 kubectl get daemonset ama-logs -n kube-system --ignore-not-found
