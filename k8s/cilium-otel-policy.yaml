@@ -1,0 +1,29 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-otel-web-to-api
+  namespace: observability-demo
+spec:
+  description: Allow and observe otel-web GET requests to the otel-api message endpoint.
+  endpointSelector:
+    matchLabels:
+      app: otel-api
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: otel-web
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: /api/message
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP

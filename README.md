@@ -27,6 +27,7 @@ The script creates or updates with Azure CLI commands:
 - AKS cluster with 2 nodes
 - Container Insights
 - Managed Prometheus
+- Advanced Container Networking Services with Cilium L7 policies
 - AKS application monitoring preview enablement
 - AKS control plane diagnostic settings
 - Kubernetes namespace and Instrumentation custom resource required by the demo app
@@ -51,10 +52,13 @@ The public web workload calls the internal API workload over HTTP. Both Node.js 
 ```powershell
 kubectl apply -f .\k8s\otel-api.yaml
 kubectl apply -f .\k8s\otel-web.yaml
+kubectl apply -f .\k8s\cilium-otel-policy.yaml
 kubectl get service otel-web -n observability-demo
 ```
 
 Open the external IP assigned to `otel-web` to generate a distributed web-to-API trace. The `otel-api` service remains internal to the cluster.
+
+The Cilium policy allows only HTTP `GET /api/message` traffic from `otel-web` to `otel-api` on port 8080. Node-originated traffic remains allowed so Kubernetes health probes continue to work. View the resulting L7 traffic in Azure Managed Grafana under **Dashboards > Azure Managed Prometheus > Kubernetes/Networking/L7 (Workload)** or **L7 (Namespace)**.
 
 ## What to expect
 

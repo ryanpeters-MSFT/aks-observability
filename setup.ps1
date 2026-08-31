@@ -183,7 +183,7 @@ catch {
 }
 
 if (-not $clusterExists) {
-    Write-Host "Creating AKS cluster with Azure Monitor logs, managed Prometheus, and app monitoring enabled..."
+    Write-Host "Creating AKS cluster with ACNS, cost analysis, and monitoring enabled..."
     az aks create `
         --resource-group $resourceGroupName `
         --name $clusterName `
@@ -192,10 +192,14 @@ if (-not $clusterExists) {
         --node-vm-size $nodeVmSize `
         --enable-managed-identity `
         --network-plugin azure `
+        --network-dataplane cilium `
+        --enable-acns `
+        --acns-advanced-networkpolicies L7 `
         --vnet-subnet-id $aksSubnetId `
         --service-cidr $serviceCidr `
         --dns-service-ip $dnsServiceIp `
-        --tier free `
+        --tier standard `
+        --enable-cost-analysis `
         --generate-ssh-keys `
         --enable-addons monitoring `
         --workspace-resource-id $logAnalyticsWorkspaceId `
@@ -216,7 +220,7 @@ if (-not $clusterExists) {
         --only-show-errors
 }
 else {
-    Write-Host "AKS cluster already exists. Ensuring monitoring features are enabled..."
+    Write-Host "AKS cluster already exists. Ensuring ACNS, cost analysis, and monitoring features are enabled..."
 
     $currentNodeCount = az aks nodepool list `
         --resource-group $resourceGroupName `
@@ -255,6 +259,10 @@ else {
     az aks update `
         --resource-group $resourceGroupName `
         --name $clusterName `
+        --tier standard `
+        --enable-acns `
+        --acns-advanced-networkpolicies L7 `
+        --enable-cost-analysis `
         --enable-azure-monitor-metrics `
         --azure-monitor-workspace-resource-id $azureMonitorWorkspaceId `
         --enable-azure-monitor-app-monitoring `

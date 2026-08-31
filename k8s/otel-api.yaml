@@ -21,7 +21,7 @@ spec:
           image: node:20-alpine
           command: ["/bin/sh", "-c"]
           args:
-            - cd /app && npm init -y >/dev/null 2>&1 && npm install express --omit=dev
+            - cd /app && npm init -y >/dev/null 2>&1 && npm install express @opentelemetry/api --omit=dev
           volumeMounts:
             - name: app-data
               mountPath: /app
@@ -33,20 +33,36 @@ spec:
           args:
             - |
               const express = require("express");
+              const { SpanStatusCode, trace } = require("@opentelemetry/api");
               const app = express();
               const port = Number(process.env.PORT || 8080);
+              const exceptionRate = Number(process.env.EXCEPTION_RATE || 0.2);
 
               app.get("/healthz", (_request, response) => response.status(200).send("ok"));
 
               app.get("/api/message", (_request, response) => {
+                if (Math.random() < exceptionRate) {
+                  const error = new Error("Synthetic API exception for Application Insights");
+                  trace.getActiveSpan()?.recordException(error);
+                  trace.getActiveSpan()?.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+                  throw error;
+                }
+
                 console.log(JSON.stringify({ level: "info", message: "API request handled" }));
                 response.json({ message: "hello from the auto-instrumented API", service: "otel-api" });
+              });
+
+              app.use((error, _request, response, _next) => {
+                console.error(error.stack);
+                response.status(500).json({ error: error.message, service: "otel-api" });
               });
 
               app.listen(port, () => console.log(JSON.stringify({ level: "info", message: "API started", port })));
           env:
             - name: PORT
               value: "8080"
+            - name: EXCEPTION_RATE
+              value: "0.2"
             - name: OTEL_SERVICE_NAME
               value: "otel-api"
           ports:
