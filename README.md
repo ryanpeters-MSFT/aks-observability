@@ -32,26 +32,43 @@ The script creates or updates with Azure CLI commands:
 - AKS control plane diagnostic settings
 - Kubernetes namespace and Instrumentation custom resource required by the demo app
 
+## Repository files
+
+Application manifests are grouped in `k8s\application\`, and monitoring manifests in `k8s\monitoring\`. Single-file categories stay at the top level of `k8s\`.
+
+| File | Description |
+| --- | --- |
+| [README.md](./README.md) | Setup, deployment, and telemetry-viewing instructions. |
+| [setup.ps1](./setup.ps1) | Provisions Azure resources and AKS observability, then applies the namespace and monitoring configuration. |
+| [k8s/namespace.yaml](./k8s/namespace.yaml) | Creates the shared `observability-demo` namespace. |
+| [k8s/cilium-otel-policy.yaml](./k8s/cilium-otel-policy.yaml) | Restricts API ingress to web requests for `GET /api/message`, while allowing node health probes. |
+| [k8s/application/demo-app-configmap.yaml](./k8s/application/demo-app-configmap.yaml) | Supplies the demo app's Node.js code, Prometheus metrics, and synthetic failures. |
+| [k8s/application/demo-app.yaml](./k8s/application/demo-app.yaml) | Deploys the demo app with telemetry annotations and exposes it through a LoadBalancer Service. |
+| [k8s/application/load-generator-job.yaml](./k8s/application/load-generator-job.yaml) | Sends 120 requests to the demo app, two seconds apart, to generate telemetry. |
+| [k8s/application/otel-api.yaml](./k8s/application/otel-api.yaml) | Deploys the auto-instrumented Node.js API with synthetic exceptions and an internal ClusterIP Service. |
+| [k8s/application/otel-web.yaml](./k8s/application/otel-web.yaml) | Deploys the auto-instrumented web frontend that calls the API and exposes a public LoadBalancer Service. |
+| [k8s/monitoring/ama-metrics-settings-configmap.yaml](./k8s/monitoring/ama-metrics-settings-configmap.yaml) | Enables annotation-based Prometheus scraping in the demo namespace. |
+| [k8s/monitoring/app-monitoring-instrumentation.yaml](./k8s/monitoring/app-monitoring-instrumentation.yaml) | Defines the shared Instrumentation resource; setup substitutes the Application Insights connection string before applying it. |
+
 ## Deploy the demo workload
 
 After the script finishes, deploy the sample app:
 
 ```powershell
-kubectl apply -f .\k8s\demo-app-configmap.yaml
-kubectl apply -f .\k8s\demo-app-deployment.yaml
-kubectl apply -f .\k8s\demo-app-service.yaml
-kubectl apply -f .\k8s\load-generator-job.yaml
+kubectl apply -f .\k8s\application\demo-app-configmap.yaml
+kubectl apply -f .\k8s\application\demo-app.yaml
+kubectl apply -f .\k8s\application\load-generator-job.yaml
 ```
 
-The script renders and applies `k8s\app-monitoring-instrumentation.yaml` for you with the live Application Insights connection string, so you do not apply that template file directly.
+The script renders and applies `k8s\monitoring\app-monitoring-instrumentation.yaml` for you with the live Application Insights connection string, so you do not apply that template file directly.
 
 ## Deploy the web and API workloads
 
 The public web workload calls the internal API workload over HTTP. Both Node.js deployments use the same OpenTelemetry autoinstrumentation resource as the demo app.
 
 ```powershell
-kubectl apply -f .\k8s\otel-api.yaml
-kubectl apply -f .\k8s\otel-web.yaml
+kubectl apply -f .\k8s\application\otel-api.yaml
+kubectl apply -f .\k8s\application\otel-web.yaml
 kubectl apply -f .\k8s\cilium-otel-policy.yaml
 kubectl get service otel-web -n observability-demo
 ```

@@ -27,8 +27,8 @@ $dnsServiceIp = "10.20.0.10"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $namespaceFilePath = Join-Path $scriptRoot "k8s\namespace.yaml"
-$metricsConfigFilePath = Join-Path $scriptRoot "k8s\ama-metrics-settings-configmap.yaml"
-$instrumentationTemplateFilePath = Join-Path $scriptRoot "k8s\app-monitoring-instrumentation.yaml"
+$metricsConfigFilePath = Join-Path $scriptRoot "k8s\monitoring\ama-metrics-settings-configmap.yaml"
+$instrumentationTemplateFilePath = Join-Path $scriptRoot "k8s\monitoring\app-monitoring-instrumentation.yaml"
 
 Write-Host "Checking Azure CLI login..."
 $subscriptionId = az account show --query id --output tsv --only-show-errors
@@ -385,7 +385,6 @@ Write-Host "Subscription:   $subscriptionId"
 Write-Host "Namespace:      $demoNamespace"
 Write-Host ""
 Write-Host "Deploy the demo workload with:"
-Write-Host "kubectl apply -f .\k8s\demo-app-configmap.yaml"
-Write-Host "kubectl apply -f .\k8s\demo-app-deployment.yaml"
-Write-Host "kubectl apply -f .\k8s\demo-app-service.yaml"
-Write-Host "kubectl apply -f .\k8s\load-generator-job.yaml"
+Write-Host "kubectl apply -f .\k8s\application\demo-app-configmap.yaml"
+Write-Host "kubectl apply -f .\k8s\application\demo-app.yaml"
+Write-Host "kubectl apply -f .\k8s\application\load-generator-job.yaml"
