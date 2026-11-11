@@ -1,6 +1,6 @@
 $location = "centralus"
 $nodeVmSize = "Standard_DS2_v2"
-$nodeCount = 2
+$nodeCount = 4
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -206,6 +206,8 @@ if (-not $clusterExists) {
         --enable-azure-monitor-metrics `
         --azure-monitor-workspace-resource-id $azureMonitorWorkspaceId `
         --enable-azure-monitor-app-monitoring `
+        --enable-gateway-api `
+        --enable-app-routing-istio `
         --no-wait `
         --output none `
         --only-show-errors
@@ -384,7 +386,10 @@ Write-Host "Cluster:        $clusterName"
 Write-Host "Subscription:   $subscriptionId"
 Write-Host "Namespace:      $demoNamespace"
 Write-Host ""
-Write-Host "Deploy the demo workload with:"
-Write-Host "kubectl apply -f .\k8s\application\demo-app-configmap.yaml"
-Write-Host "kubectl apply -f .\k8s\application\demo-app.yaml"
-Write-Host "kubectl apply -f .\k8s\application\load-generator-job.yaml"
+Write-Host "Deploy the storefront with:"
+Write-Host "kubectl apply -f .\k8s\application\storefront-configmap.yaml"
+Write-Host "kubectl apply -f .\k8s\application\inventory.yaml -f .\k8s\application\orders.yaml -f .\k8s\application\storefront.yaml"
+Write-Host "kubectl apply -f .\k8s\networking"
+Write-Host "kubectl wait --for=condition=Programmed gateway/storefront -n $demoNamespace --timeout=10m"
+Write-Host "kubectl get gateway storefront -n $demoNamespace"
+Write-Host "Storefront URL: http://aksobservability-storefront.centralus.cloudapp.azure.com"

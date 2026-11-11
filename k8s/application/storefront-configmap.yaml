@@ -1,0 +1,463 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storefront-code
+  namespace: observability-demo
+data:
+  server.js: |
+    const express = require("express");
+    const http = require("http");
+    const client = require("prom-client");
+    const { trace, SpanStatusCode } = require("@opentelemetry/api");
+
+    const app = express();
+    const role = process.env.APP_ROLE;
+    const tracer = trace.getTracer("storefront-demo");
+    const scenarios = new Set(["success", "slow", "failure", "exception", "retry", "invalid"]);
+    const products = [
+      { id: "mug", name: "Observability mug", price: 18, stock: 25 },
+      { id: "notebook", name: "Trace explorer notebook", price: 12, stock: 40 }
+    ];
+    const register = new client.Registry();
+    client.collectDefaultMetrics({ register });
+    const requests = new client.Counter({
+      name: "storefront_http_requests_total",
+      help: "Completed storefront demo requests.",
+      labelNames: ["route", "method", "status"],
+      registers: [register]
+    });
+    const duration = new client.Histogram({
+      name: "storefront_http_request_duration_seconds",
+      help: "Storefront demo request duration.",
+      labelNames: ["route", "method", "status"],
+      buckets: [0.05, 0.1, 0.5, 1, 2, 5],
+      registers: [register]
+    });
+
+    class HttpError extends Error {
+      constructor(status, message) {
+        super(message);
+        this.status = status;
+      }
+    }
+
+    function log(level, message, fields = {}) {
+      const context = trace.getActiveSpan()?.spanContext();
+      console[level](JSON.stringify({
+        level, message, service: role, trace_id: context?.traceId, span_id: context?.spanId, ...fields
+      }));
+    }
+
+    // Use Node's HTTP client so the injected instrumentation captures each dependency.
+    function callService(baseUrl, path, body) {
+      return new Promise((resolve, reject) => {
+        const payload = body === undefined ? undefined : JSON.stringify(body);
+        const request = http.request(new URL(path, baseUrl), {
+          method: payload === undefined ? "GET" : "POST",
+          headers: payload === undefined ? {} : {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload)
+          }
+        }, (response) => {
+          let text = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => { text += chunk; });
+          response.on("error", reject);
+          response.on("end", () => {
+            try {
+              const data = JSON.parse(text);
+              if (response.statusCode >= 400) {
+                reject(new HttpError(response.statusCode, data.error || "Downstream request failed"));
+              } else {
+                resolve(data);
+              }
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+        request.setTimeout(5000, () => request.destroy(new HttpError(504, "Downstream request timed out")));
+        request.on("error", reject);
+        request.end(payload);
+      });
+    }
+
+    function operation(name, handler) {
+      return (request, response, next) => {
+        tracer.startActiveSpan(name, async (span) => {
+          try {
+            const scenario = request.body?.scenario || request.query.scenario || "success";
+            span.setAttribute("demo.scenario", scenario);
+            const result = await handler(request, span);
+            const traceId = span.spanContext().traceId;
+            log("info", "Operation completed", { operation: name, scenario });
+            response.set("X-Trace-Id", traceId).json({ ...result, traceId });
+          } catch (error) {
+            if (!(error instanceof HttpError) || error.status >= 500) {
+              span.recordException(error);
+              span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+            }
+            next(error);
+          } finally {
+            span.end();
+          }
+        });
+      };
+    }
+
+    app.use((request, response, next) => {
+      if (request.path !== "/healthz" && request.path !== "/metrics") {
+        const stopTimer = duration.startTimer();
+        response.on("finish", () => {
+          const labels = {
+            route: request.route?.path || "unmatched",
+            method: request.method,
+            status: String(response.statusCode)
+          };
+          requests.inc(labels);
+          stopTimer(labels);
+        });
+      }
+      next();
+    });
+    app.use(express.json({ limit: "4kb" }));
+    app.get("/healthz", (_request, response) => response.send("ok"));
+    app.get("/metrics", async (_request, response, next) => {
+      try {
+        response.type(register.contentType).send(await register.metrics());
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    if (role === "storefront") {
+      app.get("/", (_request, response) => response.sendFile("/app/index.html"));
+      app.get("/api/products", (_request, response) => response.json(products));
+      app.post("/api/checkout", operation("storefront.checkout", (request) =>
+        callService(process.env.ORDERS_URL, "/orders", request.body)));
+    } else if (role === "orders") {
+      app.post("/orders", operation("orders.checkout", async (request, span) => {
+        const { productId, quantity, scenario = "success" } = request.body || {};
+        if (!scenarios.has(scenario) || !products.some((product) => product.id === productId) ||
+            !Number.isInteger(quantity) || quantity < 1 || quantity > 10 || scenario === "invalid") {
+          throw new HttpError(400, "Choose a known product, scenario, and a quantity from 1 to 10");
+        }
+        span.setAttributes({ "product.id": productId, "order.quantity": quantity });
+        if (scenario === "exception") {
+          throw new Error("Synthetic order-processing exception");
+        }
+        let inventory;
+        const attempts = scenario === "retry" ? 2 : 1;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+          try {
+            inventory = await callService(process.env.INVENTORY_URL,
+              `/inventory/${productId}?scenario=${scenario}&attempt=${attempt}`);
+            break;
+          } catch (error) {
+            if (attempt === attempts || !(error instanceof HttpError) || error.status !== 503) {
+              throw error;
+            }
+            span.addEvent("inventory.retry", { attempt });
+            log("warn", "Inventory unavailable; retrying once", { scenario, attempt });
+          }
+        }
+        if (inventory.stock < quantity) {
+          throw new HttpError(409, "Insufficient inventory");
+        }
+        return {
+          message: "Demo order accepted (no payment or stock change)",
+          product: inventory.name,
+          quantity,
+          total: inventory.price * quantity,
+          attempts
+        };
+      }));
+    } else if (role === "inventory") {
+      app.get("/inventory/:productId", operation("inventory.check-stock", async (request, span) => {
+        const product = products.find((item) => item.id === request.params.productId);
+        if (!product) {
+          throw new HttpError(404, "Product not found");
+        }
+        const scenario = request.query.scenario || "success";
+        if (!scenarios.has(scenario)) {
+          throw new HttpError(400, "Unknown scenario");
+        }
+        span.setAttribute("product.id", product.id);
+        if (scenario === "slow") {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
+        if (scenario === "failure" || (scenario === "retry" && request.query.attempt === "1")) {
+          throw new HttpError(503, "Synthetic inventory outage");
+        }
+        return product;
+      }));
+    } else {
+      throw new Error("APP_ROLE must be storefront, orders, or inventory");
+    }
+
+    app.use((error, request, response, _next) => {
+      const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599
+        ? error.status : 500;
+      log(status >= 500 ? "error" : "warn", error.message, { status, path: request.path });
+      response.status(status).json({
+        error: status === 500 ? "Order processing failed" : error.message,
+        service: role,
+        traceId: trace.getActiveSpan()?.spanContext().traceId
+      });
+    });
+    app.listen(8080, () => log("info", "Service started", { port: 8080 }));
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Trace &amp; Tell Storefront</title>
+      <style>
+        :root {
+          color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif;
+          color: #edf0fa; background: #090b12; font-synthesis: none;
+          --muted: #a4acc3; --line: #282d40; --panel: #121621;
+        }
+        * { box-sizing: border-box; }
+        body {
+          margin: 0; min-height: 100vh;
+          background: radial-gradient(ellipse at 75% 0, #7c3aed18, transparent 48%),
+            radial-gradient(ellipse at 0 60%, #06b6d40b, transparent 40%);
+        }
+        button, select, input { font: inherit; }
+        button, select, input, a { -webkit-tap-highlight-color: transparent; }
+        :focus-visible { outline: 3px solid #bca3ff; outline-offset: 4px; }
+        .shell { max-width: 1220px; margin: auto; padding: 0 32px 32px; }
+        .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 0; border-bottom: 1px solid var(--line); }
+        .brand { display: flex; align-items: center; gap: 12px; font-size: 17px; font-weight: 750; letter-spacing: -.4px; }
+        .brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: linear-gradient(135deg, #a78bfa, #6d28d9); box-shadow: 0 0 26px #8b5cf62b; }
+        .brand-mark svg { width: 24px; height: 24px; }
+        .pill { font-size: 11px; font-weight: 650; letter-spacing: .08em; border: 1px solid var(--line); border-radius: 99px; padding: 7px 11px; color: var(--muted); white-space: nowrap; }
+        .pill.accent { color: #b6a1ff; border-color: #574080; background: #a78bfa0b; }
+        header { padding: 44px 0 28px; }
+        .eyebrow { color: #b5a0fa; font-size: 11px; font-weight: 700; letter-spacing: .18em; margin: 0 0 16px; }
+        h1 { font-size: clamp(30px, 4vw, 46px); line-height: 1.15; letter-spacing: -1.6px; margin: 0 0 14px; }
+        h1 span { color: #b6a1ff; }
+        .intro { color: var(--muted); font-size: 15px; line-height: 1.7; margin: 0; max-width: 650px; }
+        .request-path { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 18px 22px; background: #11141f; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 28px; }
+        .path-label { font-size: 10px; letter-spacing: .13em; color: var(--muted); margin-right: auto; }
+        .node { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
+        .node::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #ad97fa; }
+        .node:first-of-type::before { background: #60d9ef; }
+        .arrow { color: #606981; font-size: 13px; }
+        .workspace { display: grid; grid-template-columns: 300px minmax(0, 1fr); align-items: start; gap: 22px; }
+        .panel { background: linear-gradient(150deg, #161a27, var(--panel)); border: 1px solid var(--line); border-radius: 18px; padding: 24px; min-width: 0; }
+        .section-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .step { font-size: 11px; font-weight: 700; color: #b6a1ff; background: #a78bfa12; border: 1px solid #a78bfa30; border-radius: 6px; padding: 4px 6px; }
+        h2 { font-size: 17px; font-weight: 650; letter-spacing: -.3px; margin: 0; }
+        .section-description { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 22px; }
+        .product-art { display: grid; place-items: center; height: 145px; margin: 22px 0; border: 1px solid #9a7df027; border-radius: 12px; background: radial-gradient(ellipse at center, #8b5cf62b, #0d101b); }
+        .product-art svg { width: 130px; height: 110px; filter: drop-shadow(0 10px 18px #0006); }
+        .catalog { display: grid; gap: 10px; font-size: 12px; margin-bottom: 24px; }
+        .catalog div { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); }
+        .catalog strong { color: #edf0fa; font-weight: 600; }
+        label { display: block; font-size: 12px; font-weight: 600; color: #c4cbe0; margin-bottom: 16px; }
+        select, input { display: block; width: 100%; margin-top: 8px; padding: 11px 12px; border: 1px solid #353d55; border-radius: 8px; background: #0d111b; color: #edf0fa; min-height: 44px; }
+        .safety { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
+        .main-column { display: grid; gap: 22px; min-width: 0; }
+        .scenarios { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .scenario {
+          --tone: #9af4c5; --wash: #18392e;
+          position: relative; display: flex; flex-direction: column; align-items: start; gap: 9px;
+          padding: 17px; border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
+          border-radius: 11px; background: linear-gradient(120deg, var(--wash), #131823);
+          color: var(--tone); text-align: left; cursor: pointer; transition: transform .18s, border-color .18s, box-shadow .18s;
+        }
+        .scenario:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--tone); box-shadow: 0 6px 24px #0004, inset 0 0 28px color-mix(in srgb, var(--tone) 7%, transparent); }
+        .scenario:active:not(:disabled) { transform: translateY(0); }
+        .scenario:disabled { opacity: .5; cursor: wait; }
+        .scenario[aria-pressed="true"] { border-color: var(--tone); box-shadow: inset 3px 0 var(--tone); }
+        .scenario-top { display: flex; width: 100%; justify-content: space-between; align-items: center; }
+        .scenario-symbol { font-size: 18px; font-weight: 700; }
+        .scenario-code { font: 10px ui-monospace, Consolas, monospace; letter-spacing: .04em; padding: 4px 6px; border-radius: 4px; background: #0003; }
+        .scenario-title { font-size: 13px; font-weight: 700; }
+        .scenario-description { font-size: 11px; color: #c0c6d6; line-height: 1.5; }
+        .scenario[data-scenario="slow"] { --tone: #fcd584; --wash: #3a2c17; }
+        .scenario[data-scenario="failure"] { --tone: #ff9aaf; --wash: #3c1b2b; }
+        .scenario[data-scenario="exception"] { --tone: #d3b1ff; --wash: #302047; }
+        .scenario[data-scenario="retry"] { --tone: #72dcf5; --wash: #133242; }
+        .scenario[data-scenario="invalid"] { --tone: #ffbb93; --wash: #38281f; }
+        .results-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .results-heading .section-heading { margin: 0; }
+        .response-state { color: var(--muted); font: 10px ui-monospace, Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; }
+        #response-panel[data-state="running"] .response-state { color: #fcd584; }
+        #response-panel[data-state="success"] .response-state { color: #9af4c5; }
+        #response-panel[data-state="error"] .response-state { color: #ff9aaf; }
+        #status { font-size: 12px; color: var(--muted); line-height: 1.6; min-height: 20px; margin: 16px 0; }
+        .response-metrics { display: grid; grid-template-columns: 100px 100px minmax(0, 1fr); gap: 12px; margin-bottom: 18px; }
+        .metric { min-width: 0; }
+        .metric-label { display: block; color: var(--muted); font-size: 9px; letter-spacing: .12em; margin-bottom: 7px; }
+        .metric-value { font: 13px ui-monospace, Consolas, monospace; color: #e0dcff; overflow-wrap: anywhere; }
+        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #090d16; color: #b4e8d4; font: 11px/1.8 ui-monospace, Consolas, monospace; padding: 18px; border: 1px solid #242b3d; border-radius: 10px; min-height: 115px; margin: 0; }
+        .response-note { font-size: 11px; line-height: 1.7; color: var(--muted); margin: 16px 0 0; }
+        code { color: #c1b1ff; }
+        footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; color: #929cb5; font-size: 10px; letter-spacing: .04em; padding: 26px 0 0; }
+        @media (max-width: 800px) {
+          .workspace { grid-template-columns: 1fr; }
+          .product-art { height: 110px; }
+          .path-label { flex-basis: 100%; }
+        }
+        @media (max-width: 480px) {
+          .shell { padding: 0 16px 24px; }
+          .topbar { padding: 18px 0; }
+          .topbar .pill { font-size: 9px; }
+          header { padding-top: 30px; }
+          .panel { padding: 18px; }
+          .scenarios { grid-template-columns: 1fr; }
+          .response-metrics { grid-template-columns: 1fr 1fr; }
+          .metric:last-child { grid-column: 1 / -1; }
+          .node { font-size: 11px; }
+          .request-path { gap: 8px; padding: 16px; }
+        }
+        @media (prefers-reduced-motion: reduce) { .scenario { transition: none; } }
+      </style>
+    </head>
+    <body>
+      <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>
+          Trace &amp; Tell
+        </div>
+        <span class="pill accent">AKS OBSERVABILITY LAB</span>
+      </div>
+      <header>
+        <p class="eyebrow">APPLICATION INSIGHTS + OPENTELEMETRY</p>
+        <h1>A small storefront.<br><span>The whole story, traced.</span></h1>
+        <p class="intro">Every checkout tells a story. Follow it across services, uncover a bottleneck, or watch a failed request find its way back.</p>
+      </header>
+      <nav class="request-path" aria-label="Application request path">
+        <span class="path-label">REQUEST PATH</span>
+        <span class="node">Gateway</span><span class="arrow" aria-hidden="true">&rarr;</span>
+        <span class="node">Storefront</span><span class="arrow" aria-hidden="true">&rarr;</span>
+        <span class="node">Orders</span><span class="arrow" aria-hidden="true">&rarr;</span>
+        <span class="node">Inventory</span>
+      </nav>
+      <main class="workspace">
+      <section class="panel" aria-labelledby="order-heading">
+        <div class="section-heading"><span class="step">01</span><h2 id="order-heading">Your demo order</h2></div>
+        <p class="section-description">A little merch. A lot of telemetry.</p>
+        <div class="product-art" aria-hidden="true">
+          <svg viewBox="0 0 150 120" fill="none">
+            <path d="M94 41h15a16 16 0 0 1 0 32H98" stroke="#bca3ff" stroke-width="7"/>
+            <path d="M35 35h66v49a16 16 0 0 1-16 16H51a16 16 0 0 1-16-16Z" fill="#6d43ba" stroke="#bca3ff" stroke-width="2"/>
+            <ellipse cx="68" cy="35" rx="33" ry="7" fill="#352452" stroke="#bca3ff" stroke-width="2"/>
+            <path d="M47 66h10l6-12 9 25 6-13h12" stroke="#e0d3ff" stroke-width="3" stroke-linejoin="round"/>
+            <path d="M56 19c-6-8 7-9 1-17M77 19c-6-8 7-9 1-17" stroke="#bca3ff" stroke-width="2" stroke-linecap="round" opacity=".6"/>
+          </svg>
+        </div>
+        <div class="catalog">
+          <div><span>Observability mug</span><strong>$18</strong></div>
+          <div><span>Trace explorer notebook</span><strong>$12</strong></div>
+        </div>
+        <label>Product <select id="product"><option value="mug">Observability mug</option><option value="notebook">Trace explorer notebook</option></select></label>
+        <label>Quantity <input id="quantity" type="number" min="1" max="10" value="1"></label>
+        <p class="safety">JUST A DEMO<br>No real payments, customer data, or inventory changes. Experiment freely.</p>
+      </section>
+      <div class="main-column">
+      <section class="panel" aria-labelledby="scenarios-heading">
+        <div class="section-heading"><span class="step">02</span><h2 id="scenarios-heading">Choose your plot twist</h2></div>
+        <p class="section-description">Six scenarios. One connected trace. Pick a story to follow.</p>
+        <div class="scenarios">
+          <button class="scenario" data-scenario="success" aria-label="Successful checkout" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#10003;</span><span class="scenario-code">200 OK</span></span>
+            <span class="scenario-title">Successful checkout</span><span class="scenario-description">The happy path, across all three services.</span>
+          </button>
+          <button class="scenario" data-scenario="slow" aria-label="Slow inventory (1.5s)" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#9201;</span><span class="scenario-code">+1.5 SEC</span></span>
+            <span class="scenario-title">Slow inventory</span><span class="scenario-description">Find the bottleneck in the waterfall.</span>
+          </button>
+          <button class="scenario" data-scenario="failure" aria-label="Inventory outage (503)" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#9889;</span><span class="scenario-code">503 ERROR</span></span>
+            <span class="scenario-title">Inventory outage</span><span class="scenario-description">One failure. A ripple through the chain.</span>
+          </button>
+          <button class="scenario" data-scenario="exception" aria-label="Order exception (500)" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#123;!&#125;</span><span class="scenario-code">500 ERROR</span></span>
+            <span class="scenario-title">Order exception</span><span class="scenario-description">A controlled error, with a stack to explore.</span>
+          </button>
+          <button class="scenario" data-scenario="retry" aria-label="Retry &amp; recover" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#8635;</span><span class="scenario-code">503 &rarr; 200</span></span>
+            <span class="scenario-title">Retry &amp; recover</span><span class="scenario-description">A second attempt makes all the difference.</span>
+          </button>
+          <button class="scenario" data-scenario="invalid" aria-label="Validation rejection (400)" aria-pressed="false">
+            <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#8856;</span><span class="scenario-code">400 REJECT</span></span>
+            <span class="scenario-title">Validation rejection</span><span class="scenario-description">Stopped at Orders. No inventory call.</span>
+          </button>
+        </div>
+      </section>
+      <section class="panel" id="response-panel" data-state="idle" aria-labelledby="response-heading" aria-busy="false">
+        <div class="results-heading">
+          <div class="section-heading"><span class="step">03</span><h2 id="response-heading">Behind the checkout</h2></div>
+          <span class="response-state" id="response-state">Awaiting request</span>
+        </div>
+        <p id="status" role="status">Choose a scenario to generate a distributed trace.</p>
+        <div class="response-metrics">
+          <div class="metric"><span class="metric-label">HTTP STATUS</span><span class="metric-value" id="response-code">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">ROUND TRIP</span><span class="metric-value" id="elapsed-time">&mdash;</span></div>
+          <div class="metric"><span class="metric-label">TRACE ID</span><span class="metric-value" id="trace-id">&mdash;</span></div>
+        </div>
+        <pre id="result" aria-live="polite">Results and the server-side trace ID appear here.</pre>
+        <p class="response-note">Follow the trace using <code>operation_Id</code> in Application Insights.<br>Server-side OTel injection only &mdash; browser telemetry is not enabled.</p>
+      </section>
+      </div>
+      </main>
+      <footer><span>TRACE &amp; TELL STOREFRONT</span><span>Node.js &nbsp;/&nbsp; AKS &nbsp;/&nbsp; OpenTelemetry</span></footer>
+      </div>
+      <script>
+        const buttons = document.querySelectorAll("[data-scenario]");
+        const panel = document.querySelector("#response-panel");
+        for (const button of buttons) {
+          button.addEventListener("click", async () => {
+            buttons.forEach((item) => {
+              item.disabled = true;
+              item.setAttribute("aria-pressed", String(item === button));
+            });
+            panel.dataset.state = "running";
+            panel.setAttribute("aria-busy", "true");
+            document.querySelector("#response-state").textContent = "In flight";
+            document.querySelector("#response-code").textContent = "\u2014";
+            document.querySelector("#elapsed-time").textContent = "\u2014";
+            document.querySelector("#trace-id").textContent = "\u2014";
+            document.querySelector("#result").textContent = "Waiting for the services to respond...";
+            const start = performance.now();
+            document.querySelector("#status").textContent = "Running " + button.dataset.scenario + "...";
+            try {
+              const response = await fetch("/api/checkout", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  productId: document.querySelector("#product").value,
+                  quantity: Number(document.querySelector("#quantity").value),
+                  scenario: button.dataset.scenario
+                })
+              });
+              const result = await response.json();
+              const elapsed = Math.round(performance.now() - start);
+              panel.dataset.state = response.ok ? "success" : "error";
+              document.querySelector("#response-state").textContent = response.ok ? "Complete" : "HTTP error";
+              document.querySelector("#response-code").textContent = response.status;
+              document.querySelector("#elapsed-time").textContent = elapsed + " ms";
+              document.querySelector("#trace-id").textContent = result.traceId || "Not returned";
+              document.querySelector("#status").textContent =
+                button.dataset.scenario + " - HTTP " + response.status + " - " + elapsed + " ms";
+              document.querySelector("#result").textContent = JSON.stringify(result, null, 2);
+            } catch (error) {
+              panel.dataset.state = "error";
+              document.querySelector("#response-state").textContent = "Request failed";
+              document.querySelector("#status").textContent = "Request failed";
+              document.querySelector("#result").textContent = error.message;
+            } finally {
+              panel.setAttribute("aria-busy", "false");
+              buttons.forEach((item) => { item.disabled = false; });
+            }
+          });
+        }
+      </script>
+    </body>
+    </html>

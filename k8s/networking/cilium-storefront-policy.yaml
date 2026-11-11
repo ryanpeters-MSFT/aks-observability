@@ -1,0 +1,71 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: storefront-to-orders
+  namespace: observability-demo
+spec:
+  endpointSelector:
+    matchLabels:
+      app: orders
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: storefront
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: POST
+                path: /orders
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: /metrics
+    - fromEntities:
+        - host
+        - remote-node
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orders-to-inventory
+  namespace: observability-demo
+spec:
+  endpointSelector:
+    matchLabels:
+      app: inventory
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: orders
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: /inventory/.*
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: /metrics
+    - fromEntities:
+        - host
+        - remote-node

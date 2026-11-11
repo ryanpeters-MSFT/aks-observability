@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: observability-demo-loadgen
+  name: storefront-loadgen
   namespace: observability-demo
 spec:
   ttlSecondsAfterFinished: 300
@@ -16,9 +16,25 @@ spec:
             - -c
           args:
             - |
-              requestCount=1
-              while [ "$requestCount" -le 120 ]; do
-                curl -sS -o /dev/null http://observability-demo/ || true
-                sleep 2
-                requestCount=$((requestCount + 1))
+              set -eu
+              cycle=1
+              while [ "$cycle" -le 5 ]; do
+                for scenario in success slow failure exception retry invalid; do
+                  case "$scenario" in
+                    failure) expected=503 ;;
+                    exception) expected=500 ;;
+                    invalid) expected=400 ;;
+                    *) expected=200 ;;
+                  esac
+                  actual=$(curl -sS --max-time 10 -o /tmp/result.json -w '%{http_code}' \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"productId\":\"mug\",\"quantity\":1,\"scenario\":\"$scenario\"}" \
+                    http://storefront/api/checkout)
+                  echo "$scenario: HTTP $actual (expected $expected)"
+                  cat /tmp/result.json
+                  echo
+                  [ "$actual" = "$expected" ] || exit 1
+                  sleep 2
+                done
+                cycle=$((cycle + 1))
               done

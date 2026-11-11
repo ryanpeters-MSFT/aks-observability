@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: observability-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+      annotations:
+        instrumentation.opentelemetry.io/inject-nodejs: "demo-instrumentation"
+        monitor.azure.com/enable-application-logs: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      initContainers:
+        - name: prepare-app
+          image: node:22-alpine
+          command: ["/bin/sh", "-ec"]
+          args:
+            - cp /config/* /app/; cd /app; npm install express@4 @opentelemetry/api@1.9.1 prom-client@15 --omit=dev --no-package-lock
+          volumeMounts:
+            - name: code
+              mountPath: /config
+            - name: app
+              mountPath: /app
+      containers:
+        - name: inventory
+          image: node:22-alpine
+          workingDir: /app
+          command: ["node", "server.js"]
+          env:
+            - name: APP_ROLE
+              value: inventory
+            - name: OTEL_SERVICE_NAME
+              value: inventory
+            - name: OTEL_TRACES_SAMPLER
+              value: always_on
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: app
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: storefront-code
+        - name: app
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: observability-demo
+spec:
+  selector:
+    app: inventory
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP
