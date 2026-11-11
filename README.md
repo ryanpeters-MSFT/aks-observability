@@ -13,8 +13,8 @@ Only the managed Istio Gateway is public; application Services are ClusterIP. Pr
 | Workload | Purpose |
 | --- | --- |
 | [Storefront](./k8s/application/storefront.yaml) | Serves the UI and forwards checkout requests to Orders. |
-| [Orders](./k8s/application/orders.yaml) | Validates orders, calls Inventory, and demonstrates exceptions and retries. |
-| [Inventory](./k8s/application/inventory.yaml) | Returns stock information and simulates delays and outages. |
+| [Orders](./k8s/application/orders.yaml) | Two replicas validate orders, call Inventory, and demonstrate exceptions and retries. |
+| [Inventory](./k8s/application/inventory.yaml) | Two replicas return stock information and simulate delays and outages. |
 
 The shared [application ConfigMap](./k8s/application/storefront-configmap.yaml) contains the Node.js code, UI, and scenario routes. Its `POST /orders` and `GET /inventory/:productId` calls match the [Cilium L7 policies](./k8s/networking/cilium-storefront-policy.yaml), which enforce HTTP methods/paths and make those service calls visible in Hubble.
 
