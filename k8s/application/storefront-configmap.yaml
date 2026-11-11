@@ -367,27 +367,27 @@ data:
         <div class="scenarios">
           <button class="scenario" data-scenario="success" aria-label="Successful checkout" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#10003;</span><span class="scenario-code">200 OK</span></span>
-            <span class="scenario-title">Successful checkout</span><span class="scenario-description">The happy path, across all three services.</span>
+            <span class="scenario-title">Successful checkout</span><span class="scenario-description">All three services complete checkout.</span>
           </button>
           <button class="scenario" data-scenario="slow" aria-label="Slow inventory (1.5s)" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#9201;</span><span class="scenario-code">+1.5 SEC</span></span>
-            <span class="scenario-title">Slow inventory</span><span class="scenario-description">Find the bottleneck in the waterfall.</span>
+            <span class="scenario-title">Slow inventory</span><span class="scenario-description">Inventory delays its response by 1.5 seconds.</span>
           </button>
           <button class="scenario" data-scenario="failure" aria-label="Inventory outage (503)" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#9889;</span><span class="scenario-code">503 ERROR</span></span>
-            <span class="scenario-title">Inventory outage</span><span class="scenario-description">One failure. A ripple through the chain.</span>
+            <span class="scenario-title">Inventory outage</span><span class="scenario-description">Inventory returns 503; checkout fails.</span>
           </button>
           <button class="scenario" data-scenario="exception" aria-label="Order exception (500)" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#123;!&#125;</span><span class="scenario-code">500 ERROR</span></span>
-            <span class="scenario-title">Order exception</span><span class="scenario-description">A controlled error, with a stack to explore.</span>
+            <span class="scenario-title">Order exception</span><span class="scenario-description">Orders throws an error before calling Inventory.</span>
           </button>
           <button class="scenario" data-scenario="retry" aria-label="Retry &amp; recover" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#8635;</span><span class="scenario-code">503 &rarr; 200</span></span>
-            <span class="scenario-title">Retry &amp; recover</span><span class="scenario-description">A second attempt makes all the difference.</span>
+            <span class="scenario-title">Retry &amp; recover</span><span class="scenario-description">Inventory fails once; Orders retries successfully.</span>
           </button>
           <button class="scenario" data-scenario="invalid" aria-label="Validation rejection (400)" aria-pressed="false">
             <span class="scenario-top"><span class="scenario-symbol" aria-hidden="true">&#8856;</span><span class="scenario-code">400 REJECT</span></span>
-            <span class="scenario-title">Validation rejection</span><span class="scenario-description">Stopped at Orders. No inventory call.</span>
+            <span class="scenario-title">Validation rejection</span><span class="scenario-description">Orders rejects invalid input before calling Inventory.</span>
           </button>
         </div>
       </section>
