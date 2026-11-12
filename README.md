@@ -97,7 +97,29 @@ Telemetry ingestion can take several minutes. Recording a controlled exception i
 
 ## Observe HTTP traffic with Hubble
 
-With Hubble connected, run a command below and generate traffic in another terminal or the UI. Press Ctrl+C to stop.
+First, with kubectl targeting the AKS cluster, run [hubble-certs.ps1](./hubble-certs.ps1) from the repository root. It retrieves the client certificates into `.certs` and configures Hubble TLS. Keep these files private and out of source control.
+
+```powershell
+.\hubble-certs.ps1
+```
+
+Then start the relay port-forward and leave this terminal running:
+
+```powershell
+kubectl port-forward -n kube-system svc/hubble-relay --address 127.0.0.1 4245:443
+```
+
+In another terminal, disable ALPN enforcement and verify connectivity (Hubble defaults to `localhost:4245`):
+
+```powershell
+# Disable ALPN enforcement in this terminal before running Hubble commands
+$env:GRPC_ENFORCE_ALPN_ENABLED="false"
+hubble status
+```
+
+Set this environment variable again in any new terminal used for `hubble observe`.
+
+Run an observation command below and generate traffic in the UI or another terminal. Press Ctrl+C to stop.
 
 HTTP filters:
 
